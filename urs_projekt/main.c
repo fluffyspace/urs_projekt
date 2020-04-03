@@ -26,14 +26,26 @@
 #include <avr/eeprom.h>
 #include "lcd.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdbool.h>
+
 uint8_t debounce_buttons_array[8];
 uint16_t global_counter;
 
-uint16_t average_array[AVERAGE_ARRAY_SIZE];
+uint16_t average_array[AVERAGE_ARRAY_SIZE] = {0};
 uint8_t average_array_counter = 0;
 
-volatile uint8_t is_calibrated = 0;
-volatile uint8_t last_sample = 0;
+uint8_t is_calibrated = 0;
+uint16_t last_sample = 0;
+uint16_t max_value = 0;
+uint16_t ref_value = 0;
+
+uint8_t user_number = 0;
+uint8_t user_pointer = 0;
+
+uint8_t menu_active = 0;
+uint8_t menu_pointer = 0;
 
 char adcStr[128]; // string that outputs to LCD when function write_to_lcd() is called
 
@@ -43,31 +55,95 @@ int main(void)
 {
 	initialize();
 	
+	// calibrating
+	while(global_counter < 300){
+		uint8_t new_sample = ADC;
+		uint8_t tmp_abs = new_sample - last_sample > 0 ? new_sample - last_sample : last_sample - new_sample;
+		last_sample = new_sample;
+		if (tmp_abs > 10) {
+			snprintf(adcStr, 128, "Calibrating...\nElapsed: %ds", global_counter/10);
+			write_to_lcd();
+		} else {
+			is_calibrated = 1;
+			break;
+		}
+		_delay_ms(200);
+	}
+	
     /* Replace with your beautiful code */
     while (1) 
     {
+		
 		if(is_button_pressed(BUTTON_SWITCH_MODE)) {
-			mode++;
-			if(mode > 2) mode = 0;
+			if(menu_active){
+				menu_active = 0;
+			} else {
+				menu_active = 1;
+			}
 		}
+		
+		if(menu_active){
+			if(is_button_pressed(BUTTON_CONFIRM)) {
+				mode = menu_pointer;
+				menu_active = 0;
+			}
+			
+			if(is_button_pressed(BUTTON_LEFT)) {
+				menu_pointer--;
+				if(menu_pointer < 0) menu_pointer = 3;
+			}
+			
+			if(is_button_pressed(BUTTON_RIGHT)) {
+				menu_pointer++;
+				if(menu_pointer > 3) menu_pointer = 0;
+			}
+			
+			switch(menu_pointer){
+				case 0:
+					snprintf(adcStr, 128, "?Alcotest");
+					break;
+				case 1:
+					snprintf(adcStr, 128, "?Change\nuser");
+					break;
+				case 2:
+					snprintf(adcStr, 128, "?Results");
+					break;
+				case 3:
+					snprintf(adcStr, 128, "?Delete\ndatabase");
+					break;
+			}
+			write_to_lcd();
+			continue;
+		}
+		
+		
 		
 		switch(mode){
 			case ALCOTEST_MODE:
+				snprintf(adcStr, 128, "%d, avg:%d", last_sample, calculate_average());
 				if(is_button_pressed(BUTTON_CONFIRM)) {
-					mode = RESULTS_MODE;
+					/*save_result();
+					mode = RESULTS_MODE;*/
 				}
 				break;
 			case SWITCH_USER_MODE:
-				
+				snprintf(adcStr, 128, "TODO:\nusers");
 				break;
 			case RESULTS_MODE:
-			
+				snprintf(adcStr, 128, "TODO:\nresults");
 				break;
 		}
+		write_to_lcd();
     }
 }
 
+void delete_database(){
+	// TODO
+}
+
 void initialize(){
+	ref_value = eeprom_read_word((uint16_t*)0);
+	user_number = eeprom_read_word((uint16_t*)16);
 	global_counter = 0;
 	mode = ALCOTEST_MODE;
 	
@@ -79,6 +155,15 @@ void initialize(){
 	sei();
 }
 
+uint16_t calculate_average() {
+	uint8_t j;
+	uint16_t sum = 0;
+	for (j = 0; j < AVERAGE_ARRAY_SIZE; ++j) {
+		sum += average_array[j];
+	}
+	return sum/AVERAGE_ARRAY_SIZE;
+}
+
 void write_to_lcd(){
 	lcd_clrscr();
 	lcd_puts(adcStr);
@@ -87,6 +172,11 @@ void write_to_lcd(){
 void push_q(uint16_t val) {
 	average_array_counter %= AVERAGE_ARRAY_SIZE;
 	average_array[average_array_counter++] = val;
+	last_sample = val;
+	
+	if (val > max_value) {
+		max_value = val;
+	}
 }
 
 void take_sensor_sample(){
@@ -101,19 +191,7 @@ ISR(TIMER1_COMPA_vect){	// global counter iteration
 		global_counter++;
 	}
 	
-	if(!is_calibrated){
-		if( && global_counter % 10 == 0){
-			uint8_t tmp_abs = ADC - last_sample > 0 ? ADC - last_sample : last_sample - ADC;
-			if (tmp_abs > 10) {
-				snprintf(adcStr, 128, "Calibrating...\nElapsed: %ds", global_counter/10);
-				write_to_lcd();
-				last_sample = ADC;
-			} else {
-				is_calibrated = 1;
-			}
-		}
-		return;
-	}
+	
 	
 	// if in alcotest mode, take sensor sample
 	if(mode == ALCOTEST_MODE && global_counter % SAMPLE_RATE == 0){
@@ -122,8 +200,10 @@ ISR(TIMER1_COMPA_vect){	// global counter iteration
 	
 	// debouncing
 	uint8_t i;
-	for(i = 0; i < sizeof(debounce_buttons_array)/sizeof(debounce_buttons_array[0]); i++){
-		if(debounce_buttons_array[i] > 0) debounce_buttons_array[i]--;
+	for(i = 0; i < 8; i++){
+		if(bit_is_set(PINB, i)) { // ako gumb nije pritisnut
+			if(debounce_buttons_array[i] > 0) debounce_buttons_array[i]--;
+		}
 	}
 }
 
@@ -152,14 +232,13 @@ void setup_global_timer(uint16_t milliseconds){
 }
 
 void debounce_button(int button){
-	debounce_buttons_array[button] = 10;
+	debounce_buttons_array[button] = 3;
 }
 
 int is_button_pressed(int button){
 	if(bit_is_clear(PINB, button) && debounce_buttons_array[button] == 0) {
 		debounce_button(button);
 		return 1;
-	} else {
-		return 0;
 	}
+	return 0;
 }

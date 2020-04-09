@@ -168,7 +168,7 @@ void calibrate()
 		uint8_t tmp_abs = new_sample - last_sample > 0 ? new_sample - last_sample : last_sample - new_sample;
 		last_sample = new_sample;
 		if (tmp_abs > 10) {
-			snprintf(adcStr, 128, "Calibrating %hhu%c \nElapsed: %ds", count*25, '%', global_counter/10);
+			snprintf(adcStr, 128, "Calibrating %hhu%c \nElapsed: %ds", count*20 '%', global_counter/10);
 			write_to_lcd();
 			} else {
 			count++;

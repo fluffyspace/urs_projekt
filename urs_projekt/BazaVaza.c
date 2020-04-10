@@ -162,22 +162,22 @@ void initialize(){
 
 void calibrate()
 {
-	while(global_counter < 300){
+	uint8_t count = 0;
+	while(global_counter < 3000){
 		uint8_t new_sample = ADC;
-		uint8_t count = 0;
 		uint8_t tmp_abs = new_sample - last_sample > 0 ? new_sample - last_sample : last_sample - new_sample;
 		last_sample = new_sample;
-		if (tmp_abs > 10) {
-			snprintf(adcStr, 128, "Calibrating %hhu%c \nElapsed: %ds", count*20 '%', global_counter/10);
-			write_to_lcd();
-			} else {
+		if (tmp_abs > 10);
+			else {
 			count++;
-			if(count == 5) {
+			if(count == 20) {
 				is_calibrated = 1;
 				break;
 			}
 		}
-		_delay_ms(200);
+		snprintf(adcStr, 128, "Calibrating %hhu%c \nElapsed: %ds", count*5, '%', global_counter/10);
+		write_to_lcd();
+		_delay_ms(100);
 	}
 }
 

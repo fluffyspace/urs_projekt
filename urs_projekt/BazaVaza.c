@@ -58,7 +58,7 @@ void delete_database(){
 	// TODO
 }
 
-int calculate_average() {
+uint16_t calculate_average() {
 	uint8_t j;
 	uint16_t sum = 0;
 	for (j = 0; j < AVERAGE_ARRAY_SIZE; ++j) {
@@ -240,7 +240,7 @@ int main()
 		
 		switch(mode){
 			case ALCOTEST_MODE:
-				snprintf(adcStr, 128, "%d, avg:%d", last_sample, calculate_average());
+				snprintf(adcStr, 128, "%d, avg:%hi", last_sample, calculate_average());
 				if(is_button_pressed(BUTTON_CONFIRM)) {
 					/*save_result();
 					mode = RESULTS_MODE;*/

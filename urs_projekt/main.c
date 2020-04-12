@@ -33,6 +33,7 @@
 volatile float ref_value = 0;
 volatile int R0 = 1200; //veci broj = brze raste funkcija (unutarnji otpor senzora kad je cista arija
 static volatile int R2 = 660; //otpor r2 otpornika u djelilu napona
+volatile float ALCsample; 
 
 uint8_t debounce_buttons_array[8];
 uint16_t global_counter;
@@ -74,7 +75,9 @@ int calculate_average() {
 	uint8_t j;
 	uint16_t sum = 0;
 	for (j = 0; j < AVERAGE_ARRAY_SIZE; ++j) {
-		sum += average_array[j];
+		ADCSRA |= _BV(ADSC);
+		while (!(ADCSRA & _BV(ADIF)));
+		sum += ADC;
 	}
 	return sum/AVERAGE_ARRAY_SIZE;
 }
@@ -94,6 +97,28 @@ void take_sensor_sample(){
 	push_q(ADC);
 }
 
+void writeADC(float BAC)
+{
+	float PROM = BAC * 2.09;
+	snprintf(Ustr, 64, "BAC: %d.%d%d mg/L", (int)BAC/10, (int)BAC%10, (int)(BAC*10)%10);
+	snprintf(Dstr, 64, "PROMILI: %d.%d%d%c.", (int)PROM/10, (int)PROM%10, (int)(PROM*10)%10, '%');
+	write_to_lcd();
+}
+
+float ADCpretvorba()
+{
+	//ucitava stanje na senzoru
+	int average = calculate_average();
+	//pretvorba ADC u BAC
+	float sens_volt = (float)average / 1024 * 5.0;
+	float RS = ((5 * R2) / sens_volt) - R2;
+	float omjer = RS / R0;
+	double x = 0.3934 * omjer;
+	float BAC = pow(x, -1.504) - ref_value;
+	
+	return BAC;
+}
+
 ISR(TIMER1_COMPA_vect){	// global counter iteration
 	// increment global counter
 	if(global_counter + 1 > sizeof(uint16_t)){
@@ -102,7 +127,7 @@ ISR(TIMER1_COMPA_vect){	// global counter iteration
 		global_counter++;
 	}
 	
-	
+	ALCsample = ADCpretvorba();
 	
 	// if in alcotest mode, take sensor sample
 	if(mode == ALCOTEST_MODE && global_counter % SAMPLE_RATE == 0){
@@ -186,28 +211,6 @@ void ADCinit()
 	ADCSRA = _BV(ADEN) | _BV(ADPS2) | _BV(ADPS1);
 }
 
-void writeADC(float BAC)
-{
-	float PROM = BAC * 2.09;
-	snprintf(Ustr, 64, "BAC: %d.%d%d mg/L", (int)BAC/10, (int)BAC%10, (int)(BAC*10)%10);
-	snprintf(Dstr, 64, "PROMILI: %d.%d%d%c.", (int)PROM/10, (int)PROM%10, (int)(PROM*10)%10, '%');
-	write_to_lcd();
-}
-
-float ADCpretvorba()
-{
-	//ucitava stanje na senzoru
-	ADCSRA |= _BV(ADSC);
-	while (!(ADCSRA & _BV(ADIF)));
-	//magija (pretvorba ADC u BAC)
-	float sens_volt = (float)ADC / 1024 * 5.0;
-	float RS = ((5 * R2) / sens_volt) - R2;
-	float omjer = RS / R0;
-	double x = 0.3934 * omjer;
-	float BAC = pow(x, -1.504) - ref_value;
-	
-	return BAC;
-}
 
 void calibrate()
 {
@@ -301,6 +304,7 @@ int main()
 		
 		switch(mode){
 			case ALCOTEST_MODE:
+				writeADC(ALCsample);
 				snprintf(Dstr, 128, "%d, avg:%d", last_sample, calculate_average());
 				if(is_button_pressed(BUTTON_CONFIRM)) {
 					/*save_result();

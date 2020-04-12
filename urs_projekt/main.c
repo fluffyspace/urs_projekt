@@ -93,9 +93,6 @@ void push_q(uint16_t val) {
 	}
 }
 
-void take_sensor_sample(){
-	push_q(ADC);
-}
 
 void writeADC(float BAC)
 {
@@ -119,6 +116,10 @@ float ADCpretvorba()
 	return BAC;
 }
 
+void take_sensor_sample(){
+	push_q(ADC);
+}
+
 ISR(TIMER1_COMPA_vect){	// global counter iteration
 	// increment global counter
 	if(global_counter + 1 > sizeof(uint16_t)){
@@ -130,8 +131,8 @@ ISR(TIMER1_COMPA_vect){	// global counter iteration
 	ALCsample = ADCpretvorba();
 	
 	// if in alcotest mode, take sensor sample
-	if(mode == ALCOTEST_MODE && global_counter % SAMPLE_RATE == 0){
-		take_sensor_sample();
+	if(is_calibrated && mode == ALCOTEST_MODE && global_counter % SAMPLE_RATE == 0){
+		ALCsample = ADCpretvorba();
 	}
 	
 	// debouncing

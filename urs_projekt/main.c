@@ -128,8 +128,6 @@ ISR(TIMER1_COMPA_vect){	// global counter iteration
 		global_counter++;
 	}
 	
-	ALCsample = ADCpretvorba();
-	
 	// if in alcotest mode, take sensor sample
 	if(is_calibrated && mode == ALCOTEST_MODE && global_counter % SAMPLE_RATE == 0){
 		ALCsample = ADCpretvorba();

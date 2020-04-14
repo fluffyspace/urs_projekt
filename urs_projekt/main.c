@@ -6,10 +6,10 @@
  */ 
 #define F_CPU 7372800UL
 
-#define SAMPLE_RATE 5
-#define COUNTER_INCREMENT_TIME 100 // in milliseconds
-#define MAX_TIMER_VALUE 65536 // 2^16 because 2 * 8 bit registers is used to store max CTC value
 #define AVERAGE_ARRAY_SIZE 10
+#define SINGLE_USER_MEMORY_SIZE 18
+#define USER_NAME_SIZE 6
+#define USER_SLOT_SIZE 1
 
 #define BUTTON_SWITCH_MODE 0
 #define BUTTON_LEFT 1
@@ -19,6 +19,10 @@
 #define ALCOTEST_MODE 0
 #define SWITCH_USER_MODE 1
 #define RESULTS_MODE 2
+#define ADD_USER_MODE 3
+#define CLEAR_DATABASE_MODE 4
+
+#define R2 660 //otpor r2 otpornika u djelilu napona
 
 #include <avr/io.h>
 #include <util/delay.h>
@@ -29,14 +33,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <string.h>
 
 volatile float ref_value = 0;
-volatile int R0 = 1200; //veci broj = brze raste funkcija (unutarnji otpor senzora kad je cista arija
-static volatile int R2 = 660; //otpor r2 otpornika u djelilu napona
+volatile int R0 = 1200; //veci broj = brze raste funkcija (unutarnji otpor senzora kad je cista arija)
 volatile float ALCsample; 
+uint16_t PROMILI;
 
-uint8_t debounce_buttons_array[8];
-uint16_t global_counter;
+uint8_t yes_no_button = 0;
+char ime[USER_NAME_SIZE] = "";
+uint8_t choose_name_pointer = 0;
+char name_current_letter = ' ';
+
+uint8_t debounce_buttons_array[4];
 
 uint16_t average_array[AVERAGE_ARRAY_SIZE] = {0};
 uint8_t average_array_counter = 0;
@@ -46,7 +55,11 @@ uint16_t last_sample = 0;
 uint16_t max_value = 0;
 
 uint8_t user_number = 0;
-uint8_t user_pointer = 0;
+
+uint8_t number_of_users = 0;
+
+uint8_t result_pointer = 0;
+float result = 0.0f;
 
 uint8_t menu_active = 0;
 uint8_t menu_pointer = 0;
@@ -55,7 +68,7 @@ char Ustr[64];
 char Dstr[64];
 // strings that outputs to LCD when function write_to_lcd() is called
 
-int mode;
+uint8_t mode;
 
 
 
@@ -68,7 +81,24 @@ void write_to_lcd(){
 }
 
 void delete_database(){
-	// TODO
+	uint8_t i;
+	uint8_t j;
+	for(i = 0; i < 4; i++){ // for each user
+		for(j = 0; j < USER_NAME_SIZE; j++){
+			eeprom_write_byte(i*SINGLE_USER_MEMORY_SIZE+j, '\0'); // delete name
+		}
+		eeprom_write_byte(i*SINGLE_USER_MEMORY_SIZE + USER_NAME_SIZE, 0); // delete slot pointer
+		for(j = 0; j < 4; j++){
+			eeprom_write_float(i*SINGLE_USER_MEMORY_SIZE + USER_NAME_SIZE + USER_SLOT_SIZE + j*4, 0.0f);
+		}
+	}
+	eeprom_write_byte(0, 'A');
+	eeprom_write_byte(1, '\0');
+	/*eeprom_write_byte(SINGLE_USER_MEMORY_SIZE, 'B');
+	eeprom_write_byte(SINGLE_USER_MEMORY_SIZE*2, 'C');
+	eeprom_write_byte(SINGLE_USER_MEMORY_SIZE*3, 'D');*/
+	eeprom_write_byte(SINGLE_USER_MEMORY_SIZE*4, 1); // how many users are in the database? only one after initialization
+	number_of_users = 1;
 }
 
 int calculate_average() {
@@ -96,10 +126,9 @@ void push_q(uint16_t val) {
 
 void writeADC(float BAC)
 {
+	// BAC = 2.56 mgl = 25.6 u float
 	float PROM = BAC * 2.09;
-	snprintf(Ustr, 64, "BAC: %d.%d%d mg/L", (int)BAC/10, (int)BAC%10, (int)(BAC*10)%10);
-	snprintf(Dstr, 64, "PROMILI: %d.%d%d%c.", (int)PROM/10, (int)PROM%10, (int)(PROM*10)%10, '%');
-	write_to_lcd();
+	snprintf(Dstr, 64, "%d.%d%dmg/L  %d.%d%d%c.", (int)BAC/10, (int)BAC%10, (int)(BAC*10)%10, (int)PROM/10, (int)PROM%10, (int)(PROM*10)%10, '%');
 }
 
 float ADCpretvorba()
@@ -116,81 +145,42 @@ float ADCpretvorba()
 	return BAC;
 }
 
-void take_sensor_sample(){
-	push_q(ADC);
-}
 
-ISR(TIMER1_COMPA_vect){	// global counter iteration
-	// increment global counter
-	if(global_counter + 1 > sizeof(uint16_t)){
-		global_counter = 0;
-		} else {
-		global_counter++;
-	}
-	
-	ALCsample = ADCpretvorba();
-	
-	// if in alcotest mode, take sensor sample
-	if(is_calibrated && mode == ALCOTEST_MODE && global_counter % SAMPLE_RATE == 0){
-		ALCsample = ADCpretvorba();
-	}
-	
-	// debouncing
+void debounce_buttons(){
 	uint8_t i;
-	for(i = 0; i < 8; i++){
+	for(i = 0; i < 4; i++){
 		if(bit_is_set(PINB, i)) { // ako gumb nije pritisnut
-			if(debounce_buttons_array[i] > 0) debounce_buttons_array[i]--;
+			if(debounce_buttons_array[i] > 0) debounce_buttons_array[i] = debounce_buttons_array[i] - 1;
 		}
 	}
 }
 
-void setup_global_timer(uint16_t milliseconds){
-	// global_timer = F_CPU / (2 * N * (1/DEBOUNCE_TIME)) - 1
-	// N is lowest possible prescaler value so that debounce_timer is less than 2^16
-	int tmp_debounce = F_CPU / (2 * (1/milliseconds));
-	if(tmp_debounce - 1 < MAX_TIMER_VALUE){
-		TCCR1B = _BV(WGM12);
-		OCR1A = tmp_debounce - 1;
-		} else if(tmp_debounce * 8 - 1 < MAX_TIMER_VALUE){
-		TCCR1B = _BV(WGM12) | _BV(CS11);
-		OCR1A = tmp_debounce * 8 - 1;
-		} else if(tmp_debounce * 64 - 1 < MAX_TIMER_VALUE){
-		TCCR1B = _BV(WGM12) | _BV(CS11) | _BV(CS10);
-		OCR1A = tmp_debounce * 64 - 1;
-		} else if(tmp_debounce * 256 - 1 < MAX_TIMER_VALUE){
-		TCCR1B = _BV(WGM12) | _BV(CS12);
-		OCR1A = tmp_debounce * 256 - 1;
-		} else {
-		TCCR1B = _BV(WGM12) | _BV(CS10) | _BV(CS12);
-		OCR1A = tmp_debounce * 1024 - 1;
-	}
-	TCCR1A = 0;
-	TIMSK = _BV(OCIE1A);
-}
-
-void debounce_button(int button){
-	debounce_buttons_array[button] = 3;
-}
-
-int is_button_pressed(int button){
+uint8_t is_button_pressed(int button){
 	if(bit_is_clear(PINB, button) && debounce_buttons_array[button] == 0) {
-		debounce_button(button);
+		// make debounce increase to 30;
+		debounce_buttons_array[button] = 1;
 		return 1;
 	}
 	return 0;
 }
 
 void initialize(){
-	user_number = eeprom_read_word((uint16_t*)16);
-	global_counter = 0;
+	//user_number = eeprom_read_word((uint16_t*)16);
 	mode = ALCOTEST_MODE;
+	menu_active = 1;
 	
 	// buttons
 	PORTB = _BV(0) | _BV(1) | _BV(2) | _BV(3);
-	DDRB = 0;
+	DDRB = 0;	
 	
-	setup_global_timer(COUNTER_INCREMENT_TIME);
-	sei();
+	DDRA |=_BV(1);
+	PORTA &= ~_BV(1);
+	
+	number_of_users = eeprom_read_byte(4*SINGLE_USER_MEMORY_SIZE);
+	if(number_of_users < 1 || number_of_users > 4){
+		delete_database();
+	}
+	read_user_name();
 }
 
 void LCDinit()
@@ -216,14 +206,13 @@ void ADCinit()
 void calibrate()
 {
 	uint8_t count = 0;
-	while(global_counter < 3000)
-	{
+	while(!is_calibrated){
 		ADCSRA |= _BV(ADSC);
 		while (!(ADCSRA & _BV(ADIF)));
-	
+		
 		uint16_t new_sample = ADC;
 		uint8_t tmp_abs = 0;
-	
+		
 		if((new_sample - last_sample) > 0) tmp_abs = new_sample - last_sample;
 		else tmp_abs = last_sample - new_sample;
 		last_sample = new_sample;
@@ -236,15 +225,68 @@ void calibrate()
 				is_calibrated = 1;
 				ref_value = ADCpretvorba();
 				R0 *= 1 + ref_value/420; //veci broj = brze raste funkcija
-				break;
+				snprintf(Dstr, 64, "");
 			}
 		}
-		snprintf(Ustr, 64, "Calibrating: %hhu%c", count*5, '%');
+		snprintf(Ustr, 64, "Calibrating:%hhu%c", count*5, '%');
 		write_to_lcd();
 		_delay_ms(50); //ako je vec dovoljno zagrijan senzor kalibracija ce bit gotova u jednu sekundu
 	}
 }
 
+void save_result(float BAC){
+	float max_tmp;
+	max_tmp = eeprom_read_float((uint8_t)user_number*SINGLE_USER_MEMORY_SIZE + USER_NAME_SIZE + USER_SLOT_SIZE + 12);
+	if(max_tmp < BAC){
+		eeprom_write_float((uint8_t)user_number*SINGLE_USER_MEMORY_SIZE + USER_NAME_SIZE + USER_SLOT_SIZE + 12, BAC);
+	}
+	
+	uint8_t save_offest = eeprom_read_byte((uint8_t)user_number*SINGLE_USER_MEMORY_SIZE + USER_NAME_SIZE);
+	eeprom_write_float((uint8_t) user_number*SINGLE_USER_MEMORY_SIZE + USER_NAME_SIZE + USER_SLOT_SIZE + 4*save_offest, BAC);
+	if(save_offest >= 3){
+		save_offest = 0;
+	} else {
+		save_offest++;
+	}
+	eeprom_write_byte(user_number*SINGLE_USER_MEMORY_SIZE+USER_NAME_SIZE, save_offest);
+}
+
+void read_user_name(){
+	eeprom_read_block(ime, user_number*SINGLE_USER_MEMORY_SIZE, USER_NAME_SIZE);
+}
+
+void get_user_result(){
+	result = eeprom_read_float(user_number*SINGLE_USER_MEMORY_SIZE + USER_NAME_SIZE + USER_SLOT_SIZE + result_pointer*4);
+}
+
+float average_result() {
+	uint8_t j;
+	float sum = 0.0f;
+	for (j = 0; j < 3; ++j) {
+		sum += eeprom_read_float(user_number*SINGLE_USER_MEMORY_SIZE+USER_NAME_SIZE+USER_SLOT_SIZE+j*4);
+	}
+	return sum/(float)3;
+}
+
+void add_new_user_update_screen(){
+	snprintf(Ustr, 128, "User:%s", ime);
+	write_to_lcd();
+	lcd_gotoxy(5+choose_name_pointer, 0);
+	lcd_putc(name_current_letter);
+	lcd_gotoxy(5+choose_name_pointer, 0);
+}
+
+void add_new_user(){
+	if(number_of_users >= 4) return;
+	uint8_t j;
+	for (j = 0; j < USER_NAME_SIZE-1; ++j) {
+		eeprom_write_byte(number_of_users*SINGLE_USER_MEMORY_SIZE + j, ime[j]);
+	}
+	//eeprom_write_block(ime, number_of_users*SINGLE_USER_MEMORY_SIZE, USER_NAME_SIZE-1); // write name
+	//eeprom_write_byte(number_of_users*SINGLE_USER_MEMORY_SIZE + USER_NAME_SIZE - 1, '\0'); // write name
+	number_of_users++;
+	eeprom_write_byte(SINGLE_USER_MEMORY_SIZE*4, number_of_users); // how many users are in the database?
+}
 
 int main()
 {
@@ -258,45 +300,76 @@ int main()
     /* Replace with your beautiful code */
     while (1) 
     {
-		
+		debounce_buttons();
+
 		if(is_button_pressed(BUTTON_SWITCH_MODE)) {
 			if(menu_active){
-				menu_active = 0;
+				//menu_active = 0;
 			} else {
 				menu_active = 1;
 			}
 		}
 		
 		if(menu_active){
+			if(mode == ADD_USER_MODE){
+				lcd_command(LCD_DISP_ON);
+			}
+			
 			if(is_button_pressed(BUTTON_CONFIRM)) {
+				// odabrano nesto iz menu-a
+				if(menu_pointer == ADD_USER_MODE){
+					if(number_of_users > 4) continue;
+					snprintf(ime, USER_NAME_SIZE, ""); // ocisti varijablu ime
+					snprintf(Dstr, 128, "");
+					lcd_command(LCD_DISP_ON_CURSOR_BLINK); // napravi da cursor blinka
+					choose_name_pointer = 0;
+					name_current_letter = 'A';
+					add_new_user_update_screen();
+				} else if(menu_pointer == RESULTS_MODE){
+					result_pointer = 0;
+					get_user_result();
+				} else if(menu_pointer == SWITCH_USER_MODE){
+					read_user_name();
+				}
 				mode = menu_pointer;
 				menu_active = 0;
+				//snprintf(Ustr, 128, "User:%s", ime);
+				
 			}
 			
 			if(is_button_pressed(BUTTON_LEFT)) {
-				menu_pointer--;
-				if(menu_pointer < 0) menu_pointer = 3;
+				if(menu_pointer == 0){
+					menu_pointer = 4;
+				} else {
+					menu_pointer--;
+				}
+				
 			}
 			
 			if(is_button_pressed(BUTTON_RIGHT)) {
 				menu_pointer++;
-				if(menu_pointer > 3) menu_pointer = 0;
+				if(menu_pointer > 4) menu_pointer = 0;
 			}
 			
+			
 			switch(menu_pointer){
-				case 0:
+				case ALCOTEST_MODE:
 					snprintf(Ustr, 64, "?Alcotest");
 					break;
-				case 1:
-					snprintf(Ustr, 64, "?Change\nuser");
+				case SWITCH_USER_MODE:
+					snprintf(Ustr, 64, "?Switch\nuser");
 					break;
-				case 2:
+				case RESULTS_MODE:
 					snprintf(Ustr, 64, "?Results");
 					break;
-				case 3:
-					snprintf(Ustr, 64, "?Delete\ndatabase");
+				case ADD_USER_MODE:
+					snprintf(Ustr, 64, "?Add new\nusers");
+					break;
+				case CLEAR_DATABASE_MODE:
+					snprintf(Ustr, 64, "?Clear\ndatabase");
 					break;
 			}
+			snprintf(Dstr, 64, "");
 			write_to_lcd();
 			continue;
 		}
@@ -305,21 +378,144 @@ int main()
 		
 		switch(mode){
 			case ALCOTEST_MODE:
+			{
+				ALCsample = ADCpretvorba();
+				snprintf(Ustr, 128, "User:%s", ime);
 				writeADC(ALCsample);
-				snprintf(Dstr, 128, "%d, avg:%d", last_sample, calculate_average());
+				if(ALCsample > 2.5) PORTA |= _BV(1);
+				else PORTA &= ~_BV(1);
+				_delay_ms(150);
 				if(is_button_pressed(BUTTON_CONFIRM)) {
-					/*save_result();
-					mode = RESULTS_MODE;*/
+					save_result(ALCsample);
+					mode = RESULTS_MODE;
 				}
+				write_to_lcd();
 				break;
+			}
 			case SWITCH_USER_MODE:
-				snprintf(Ustr, 128, "TODO:\nusers");
+			
+				if(is_button_pressed(BUTTON_CONFIRM)) {
+					mode = ALCOTEST_MODE;
+					menu_active = 1;
+				}
+				
+				if(is_button_pressed(BUTTON_LEFT)) {
+					if(user_number == 0){
+						user_number = number_of_users-1;
+						} else {
+						user_number--;
+					}
+					read_user_name();
+				}
+				
+				if(is_button_pressed(BUTTON_RIGHT)) {
+					user_number++;
+					if(user_number > number_of_users-1) user_number = 0;
+					read_user_name();
+				}
+
+				snprintf(Ustr, 128, "User:%s", ime);
+				snprintf(Dstr, 128, "ID:%d of %d", user_number+1, number_of_users);
+				write_to_lcd();
 				break;
 			case RESULTS_MODE:
-				snprintf(Ustr, 128, "TODO:\nresults");
+				get_user_result();
+				if(is_button_pressed(BUTTON_LEFT)) {
+					if(result_pointer == 0){
+						result_pointer = 4;
+						} else {
+						result_pointer--;
+					}
+					get_user_result();
+				}
+				
+				if(is_button_pressed(BUTTON_RIGHT)) {
+					if(result_pointer >= 4){
+						result_pointer = 0;
+						} else {
+						result_pointer++;
+					}
+					get_user_result();
+				}
+				
+				if(result_pointer < 3) {
+					snprintf(Ustr, 128, "User:%s  %d.", ime, result_pointer+1);
+					writeADC(result);
+				} else if(result_pointer == 3) {
+					snprintf(Ustr, 128, "User:%s  MAX:", ime);
+					writeADC(result);
+				} else if(result_pointer == 4) {
+					snprintf(Ustr, 128, "User:%s  AVG:", ime);
+					writeADC(average_result());					
+				}
+				write_to_lcd();
+				break;
+			case ADD_USER_MODE:
+				add_new_user_update_screen();
+			
+				if(is_button_pressed(BUTTON_LEFT)) {
+					if(name_current_letter == 65){
+						name_current_letter = 32;
+					} else if(name_current_letter == 32){
+						name_current_letter = 90;
+					} else {
+						name_current_letter--;
+				}
+				add_new_user_update_screen();
+				}
+				
+				if(is_button_pressed(BUTTON_RIGHT)) {
+					if(name_current_letter >= 90){
+						name_current_letter = 32;
+					} else if(name_current_letter == 32){
+						name_current_letter = 65;
+					} else {
+						name_current_letter++;
+					}
+					add_new_user_update_screen();
+				}
+				
+				if(is_button_pressed(BUTTON_CONFIRM)) {
+					if(name_current_letter == 32){
+						// save ime to eeprom as new user
+						add_new_user();
+						mode = ALCOTEST_MODE;
+						menu_active = 1;
+						lcd_command(LCD_DISP_ON);
+					} else {
+						snprintf(ime, USER_NAME_SIZE, "%s%c\0", ime, name_current_letter);
+						name_current_letter = 32;
+						choose_name_pointer++;
+					}
+					add_new_user_update_screen();
+				}
+				break;
+			case CLEAR_DATABASE_MODE:
+				snprintf(Ustr, 128, "Clear db?");
+				if(is_button_pressed(BUTTON_LEFT) || is_button_pressed(BUTTON_RIGHT)) {
+					if(!yes_no_button){
+						yes_no_button = 1;
+					} else {
+						yes_no_button = 0;
+					}
+				}
+				
+				if(!yes_no_button){
+					snprintf(Dstr, 128, "No");
+				} else {
+					snprintf(Dstr, 128, "Yes");
+					if(is_button_pressed(BUTTON_CONFIRM)) {
+						snprintf(Ustr, 128, "Clearing db...");
+						snprintf(Dstr, 128, "Wait...");
+						write_to_lcd();
+						delete_database();
+						mode = ALCOTEST_MODE;
+						menu_active = 1;
+					}
+				}
+				write_to_lcd();
 				break;
 		}
-		write_to_lcd();
+		_delay_ms(50);
     }
 }
-
